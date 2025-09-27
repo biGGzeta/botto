@@ -56,7 +56,6 @@ class GridBot:
                         tp_ok = True
                 if o.get('type') in ("STOP_MARKET", "STOP") and o.get('closePosition') in (True, 'true', 'True'):
                     sl_ok = True
-            # Si no existen, crear TP/SL
             if not tp_ok:
                 self.orders.place_tp_sell(entry_price*1.003, abs(qty), "AUTO_TP")
                 print(f"[STARTUP] TP repuesto en {self.client.round_price(entry_price*1.003):.2f}")
@@ -129,11 +128,9 @@ class GridBot:
             print("[GRID] No hay niveles para grid.")
             return
 
-        # --- LOGGING ---
         contexto = self._get_contexto_log()
         guardar_estado_vivo(contexto)
         guardar_historico(contexto)
-        # --- END LOGGING ---
 
         print(f"[GRID] Rebalance spacing={round(self.current_spacing*100,2)}% range={round(self.current_range*100,2)}% niveles={len(niveles)}")
 
@@ -148,6 +145,16 @@ class GridBot:
             print(f"[WARN] Quedaron {len(open_orders)} órdenes abiertas antes de crear grid nuevo")
 
         avg_entry = self.state.calcular_costo_promedio()
+        # FIX robusto para posición residual
+        pos_qty = float(self.state.state.get('posicion_total', 0.0))
+        if pos_qty < 1e-3:
+            print("[FIX] Posición virtualmente cerrada, reseteando avg_entry a 0 y posición_total a 0.")
+            avg_entry = 0.0
+            self.state.state['posicion_total'] = 0.0
+            self.state.state['costo_total'] = 0.0
+            self.state.save_state()
+        # FIN FIX
+
         for p in niveles:
             if p is None or p == 0:
                 continue

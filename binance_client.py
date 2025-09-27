@@ -6,6 +6,8 @@ from binance.enums import *
 from binance.exceptions import BinanceAPIException
 from config import API_KEY, API_SECRET, SYMBOL, LEVERAGE, PAPER_MODE, USE_TESTNET
 
+import os
+
 class BinanceClient:
     def __init__(self):
         self.client = Client(API_KEY, API_SECRET, testnet=USE_TESTNET)

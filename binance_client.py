@@ -45,6 +45,7 @@ class BinanceClient:
     def round_qty(self, qty):
         step = self.filters['stepSize']
         min_qty = self.filters['minQty']
+        # ceil to step
         steps = int(qty / step)
         q = steps * step
         if q < min_qty:
@@ -90,11 +91,13 @@ class BinanceClient:
             return []
         return self.client.futures_get_open_orders(symbol=SYMBOL)
 
-    # Método necesario para OrderManager y bot.py
     def place_limit(self, side, price, qty, reduce_only=False, newClientOrderId=None):
         """
         Wrapper para crear órdenes límite (Futures) en Binance.
         """
+        if price is None or price == 0 or qty is None or qty == 0:
+            print("[ERROR] place_limit: precio o qty cero/None")
+            return {'status': 'ERROR', 'error': 'price or qty zero'}
         params = {
             'symbol': SYMBOL,
             'side': side,
@@ -106,12 +109,22 @@ class BinanceClient:
         }
         if newClientOrderId:
             params['newClientOrderId'] = newClientOrderId
-        return self.futures_create_order(**params)
+        try:
+            return self.futures_create_order(**params)
+        except BinanceAPIException as e:
+            print(f"[ERROR] API Binance place_limit: {e}")
+            return {'status': 'ERROR', 'error': str(e)}
+        except Exception as e:
+            print(f"[ERROR] place_limit: {e}")
+            return {'status': 'ERROR', 'error': str(e)}
 
     def place_stop_market_close_position(self, stop_price):
         """
         Coloca una orden STOP_MARKET para cerrar posición.
         """
+        if stop_price is None or stop_price == 0:
+            print("[ERROR] place_stop_market_close_position: stop_price cero/None")
+            return {'status': 'ERROR', 'error': 'stop_price zero'}
         params = {
             'symbol': SYMBOL,
             'side': SIDE_SELL,
@@ -120,7 +133,14 @@ class BinanceClient:
             'reduceOnly': True,
             'closePosition': True,
         }
-        return self.futures_create_order(**params)
+        try:
+            return self.futures_create_order(**params)
+        except BinanceAPIException as e:
+            print(f"[ERROR] API Binance stop_market_close_position: {e}")
+            return {'status': 'ERROR', 'error': str(e)}
+        except Exception as e:
+            print(f"[ERROR] stop_market_close_position: {e}")
+            return {'status': 'ERROR', 'error': str(e)}
 
     def get_open_orders(self):
         return self.futures_get_open_orders()
@@ -129,7 +149,14 @@ class BinanceClient:
         if PAPER_MODE:
             print(f"[PAPER] cancelar orden {orderId}")
             return {'status': 'CANCELLED', 'orderId': orderId}
-        return self.client.futures_cancel_order(symbol=SYMBOL, orderId=orderId)
+        try:
+            return self.client.futures_cancel_order(symbol=SYMBOL, orderId=orderId)
+        except BinanceAPIException as e:
+            print(f"[ERROR] cancelar orden {orderId}: {e}")
+            return {'status': 'ERROR', 'error': str(e)}
+        except Exception as e:
+            print(f"[ERROR] cancelar orden {orderId}: {e}")
+            return {'status': 'ERROR', 'error': str(e)}
 
     def cancel_all(self):
         return self.futures_cancel_all_open_orders()

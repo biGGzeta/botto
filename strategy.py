@@ -71,7 +71,6 @@ def recomendar_rango(signal, min_range, max_range):
     return (min_range + max_range) / 2.0
 
 def construir_grid(precio_actual, spacing, range_down):
-    # Implementación asumida como antes
     niveles = []
     n = int(range_down / spacing)
     for i in range(n):

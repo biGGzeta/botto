@@ -1,6 +1,6 @@
 import asyncio
 import time
-from datetime import datetime
+from datetime import datetime, UTC
 from websocket_listener import WebSocketManager
 from binance_client import BinanceClient
 from orders import OrderManager
@@ -11,7 +11,8 @@ from config import (
     SYMBOL, MIN_GRID_SPACING, MAX_GRID_SPACING,
     GRID_RANGE_MIN, GRID_RANGE_MAX, REBALANCE_SECONDS,
     MIN_PROFIT_THRESHOLD, TP_OFFSET_LOW, TP_OFFSET_MID, TP_OFFSET_HIGH,
-    STOP_LOSS_PERCENTAGE, PAPER_MODE, MAKER_FEE_RATE
+    STOP_LOSS_PERCENTAGE, PAPER_MODE, MAKER_FEE_RATE,
+    ORDER_USDT_SIZE, LEVERAGE
 )
 
 from logger import guardar_estado_vivo, guardar_historico
@@ -102,7 +103,7 @@ class GridBot:
 
         if PAPER_MODE:
             for p in niveles[:6]:
-                qty = self.orders.calcular_cantidad(p)
+                qty = self.orders.calcular_cantidad(p, ORDER_USDT_SIZE, LEVERAGE)
                 print(f"[PAPER][BUY] LIMIT {p} x {qty}")
             return
 
@@ -112,7 +113,7 @@ class GridBot:
             pass
 
         for p in niveles:
-            qty = self.orders.calcular_cantidad(p)
+            qty = self.orders.calcular_cantidad(p, ORDER_USDT_SIZE, LEVERAGE)
             self.orders.colocar_orden_limit('BUY', p, qty, reduce_only=False)
 
         await self.colocar_tp_y_sl_si_corresponde()
@@ -124,7 +125,7 @@ class GridBot:
             avail = self.client.get_available_balance()
             if avail <= 0:
                 return niveles[:5]
-            max_orders = int(avail // float(self.client.ORDER_USDT_SIZE))
+            max_orders = int(avail // float(ORDER_USDT_SIZE))
             if max_orders <= 0:
                 max_orders = 1
             return niveles[:max_orders]
@@ -190,7 +191,7 @@ class GridBot:
             ]
             stop_loss = next((o for o in open_orders if o.get("side") == "SELL" and o.get("type", "") == "STOP_MARKET"), {})
             contexto = {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "signal": self.last_signal,
                 "last_price": self.last_price,
                 "position": position,
@@ -201,7 +202,7 @@ class GridBot:
                 "symbol": SYMBOL,
             }
         except Exception as e:
-            contexto = {"error": str(e), "timestamp": datetime.utcnow().isoformat()}
+            contexto = {"error": str(e), "timestamp": datetime.now(UTC).isoformat()}
         return contexto
 
     async def run(self):

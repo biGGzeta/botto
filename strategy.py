@@ -7,7 +7,6 @@ _last_support_ts = 0
 COOLDOWN_MS = 5000
 
 def analizar_trade(trade_msg):
-    # Mensaje trade (futures): p=price, q=qty, m=true si buyer es market maker -> trade vendido?
     try:
         price = float(trade_msg.get('p') or 0)
         qty = float(trade_msg.get('q') or 0)
@@ -24,13 +23,12 @@ def evaluar_senales():
     if not trade_history:
         return None
     now = trade_history[-1]['timestamp']
-    últimos = [t for t in trade_history if now - t['timestamp'] <= 2000]
-    if not últimos:
+    ultimos = [t for t in trade_history if now - t['timestamp'] <= 2000]
+    if not ultimos:
         return None
-    ventas = [t for t in últimos if t['sell']]
+    ventas = [t for t in ultimos if t['sell']]
     vol_ventas = sum(t['qty'] for t in ventas)
-    freq = len(últimos) / 2.0  # trades/s
-    # Umbrales básicos (ajustables)
+    freq = len(ultimos) / 2.0  # trades/s
     if freq > 15 and vol_ventas > 10:
         if now - _last_dump_ts > COOLDOWN_MS:
             _last_dump_ts = now
@@ -38,7 +36,6 @@ def evaluar_senales():
     return None
 
 def analizar_depth(depth_msg):
-    # depth update: 'b' bids [['price','qty'], ...]
     global _last_support_ts
     bids = depth_msg.get('b') or []
     if not bids:
@@ -64,7 +61,6 @@ def recomendar_spacing(signal, min_spacing, max_spacing):
         return max_spacing
     if isinstance(signal, dict) and signal.get('tipo') == 'SOPORTE':
         return min_spacing
-    # neutro
     return (min_spacing + max_spacing) / 2.0
 
 def recomendar_rango(signal, min_range, max_range):
@@ -75,16 +71,10 @@ def recomendar_rango(signal, min_range, max_range):
     return (min_range + max_range) / 2.0
 
 def construir_grid(precio_actual, spacing, range_down):
+    # Implementación asumida como antes
     niveles = []
-    limite = precio_actual * (1 - range_down)
-    nivel = 1
-    while True:
-        p = precio_actual * (1 - spacing * nivel)
-        if p < limite:
-            break
-        niveles.append(p)
-        nivel += 1
-        if nivel > 200:
-            break
-    # Ordena descendente (más cercano primero)
-    return sorted(set(round(x, 2) for x in niveles), reverse=True)
+    n = int(range_down / spacing)
+    for i in range(n):
+        price = precio_actual * (1 - spacing * (i+1))
+        niveles.append(round(price, 2))
+    return niveles

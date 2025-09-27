@@ -12,7 +12,7 @@ from config import (
     GRID_RANGE_MIN, GRID_RANGE_MAX, REBALANCE_SECONDS,
     MIN_PROFIT_THRESHOLD, TP_OFFSET_LOW, TP_OFFSET_MID, TP_OFFSET_HIGH,
     STOP_LOSS_PERCENTAGE, PAPER_MODE, MAKER_FEE_RATE,
-    ORDER_USDT_SIZE, LEVERAGE
+    ORDER_USDT_SIZE, LEVERAGE, SAFE_SPREAD
 )
 from logger import guardar_estado_vivo, guardar_historico
 
@@ -30,6 +30,41 @@ class GridBot:
         self._last_rebalance = 0
 
         print(f"[INFO] PAPER_MODE={'ON' if PAPER_MODE else 'OFF'} | ENV={'TEST' if self.client.client.testnet else 'PROD'} | Symbol={SYMBOL}")
+
+    async def proteger_posicion_existente(self):
+        pos_info = self.client.futures_position_information()
+        qty = 0.0
+        entry_price = None
+        for pos in pos_info:
+            if pos.get('symbol') == SYMBOL:
+                qty = float(pos.get('positionAmt', 0))
+                entry_price = float(pos.get('entryPrice', 0))
+                break
+        if abs(qty) > 0.0:
+            print(f"[STARTUP] Posición detectada: qty={qty} entry={entry_price}")
+            self.state.state['posicion_total'] = abs(qty)
+            self.state.state['costo_total'] = abs(qty) * entry_price
+            self.state.state['fills'] = []
+            open_orders = self.orders.get_open_orders()
+            tp_ok = False
+            sl_ok = False
+            # Verifica si hay TP/SL activos
+            for o in open_orders:
+                if o.get('side') == 'SELL' and o.get('reduceOnly'):
+                    tp_target = entry_price * 1.003
+                    if abs(float(o.get('price')) - tp_target)/tp_target <= 0.0002:
+                        tp_ok = True
+                if o.get('type') in ("STOP_MARKET", "STOP") and o.get('closePosition') in (True, 'true', 'True'):
+                    sl_ok = True
+            # Si no existen, crear TP/SL
+            if not tp_ok:
+                self.orders.place_tp_sell(entry_price*1.003, abs(qty), "AUTO_TP")
+                print(f"[STARTUP] TP repuesto en {self.client.round_price(entry_price*1.003):.2f}")
+            if not sl_ok:
+                self.orders.colocar_stop_loss_close_position(entry_price*(1-STOP_LOSS_PERCENTAGE))
+                print(f"[STARTUP] SL repuesto en {self.client.round_price(entry_price*(1-STOP_LOSS_PERCENTAGE)):.2f}")
+        else:
+            print("[STARTUP] No hay posición abierta al iniciar el bot.")
 
     async def procesar_trade(self, msg):
         sig = strategy.analizar_trade(msg)
@@ -102,20 +137,26 @@ class GridBot:
 
         print(f"[GRID] Rebalance spacing={round(self.current_spacing*100,2)}% range={round(self.current_range*100,2)}% niveles={len(niveles)}")
 
-        # CANCELAR TODAS LAS ÓRDENES ANTES DE ARMAR NUEVAS
         try:
             self.orders.cancel_all()
-            await asyncio.sleep(0.5)  # Esperar un poco para asegurar que se cancelan
+            await asyncio.sleep(0.5)
         except Exception as e:
             print(f"[ERROR] Cancelar todas: {e}")
 
-        # Chequear que no quedan órdenes abiertas
         open_orders = self.orders.get_open_orders()
         if open_orders:
             print(f"[WARN] Quedaron {len(open_orders)} órdenes abiertas antes de crear grid nuevo")
 
+        avg_entry = self.state.calcular_costo_promedio()
         for p in niveles:
             if p is None or p == 0:
+                continue
+            # SAFE: Solo colocar la orden si está por debajo del promedio y mejora el promedio lo suficiente
+            if avg_entry and p >= avg_entry:
+                print(f"[SAFE GRID] No se coloca orden en {p} porque está por encima del promedio de entrada ({avg_entry})")
+                continue
+            if avg_entry and ((avg_entry - p)/avg_entry < SAFE_SPREAD):
+                print(f"[SAFE GRID] No se coloca orden en {p} porque no mejora el promedio suficiente (SAFE_SPREAD={SAFE_SPREAD})")
                 continue
             qty = self.orders.calcular_cantidad(p, ORDER_USDT_SIZE, LEVERAGE)
             if qty is None or qty == 0:
@@ -158,18 +199,13 @@ class GridBot:
             return
         avg = self.state.calcular_costo_promedio()
         open_orders = self.orders.get_open_orders()
-
-        # TP robusto y simplificado: solo crea TP si no existe en rango y mejora promedio de entrada
         self.orders.ensure_take_profits(avg, pos, open_orders, offset=0.0002)
-
         sl_price = avg * (1 - STOP_LOSS_PERCENTAGE)
         self.orders.colocar_stop_loss_close_position(sl_price)
 
-        # --- LOGGING ---
         contexto = self._get_contexto_log()
         guardar_estado_vivo(contexto)
         guardar_historico(contexto)
-        # --- END LOGGING ---
 
     def _get_contexto_log(self):
         try:
@@ -204,6 +240,7 @@ class GridBot:
         return contexto
 
     async def run(self):
+        await self.proteger_posicion_existente()
         ws = WebSocketManager()
         async def handler(msg, tipo):
             try:

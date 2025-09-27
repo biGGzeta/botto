@@ -1,3 +1,5 @@
+ORDER_TYPE_STOP_MARKET = "STOP_MARKET"
+
 from binance_client import BinanceClient
 from config import SYMBOL
 
@@ -6,6 +8,9 @@ class OrderManager:
         self.client = client
 
     def calcular_cantidad(self, precio, usdt_size, leverage):
+        if precio is None or precio == 0:
+            print("[ERROR] calcular_cantidad: precio es cero o None")
+            return 0
         qty = (usdt_size * leverage) / precio
         return self.client.round_qty(qty)
 
@@ -18,6 +23,12 @@ class OrderManager:
         return self.client.place_limit('SELL', price, qty, reduce_only=True, newClientOrderId=cId)
 
     def place_sl_close_position(self, stop_price):
+        return self.client.place_stop_market_close_position(stop_price)
+
+    def colocar_stop_loss_close_position(self, stop_price):
+        """
+        Coloca una orden STOP_MARKET para cerrar la posición en el cliente Binance.
+        """
         return self.client.place_stop_market_close_position(stop_price)
 
     def get_open_orders(self):
@@ -79,41 +90,22 @@ class OrderManager:
         return {'created': len(to_create), 'canceled': len(to_cancel), 'kept': len(matched_ids)}
 
     # ---------- TP/SL dedupe & ensure ----------
-    def ensure_take_profits(self, base_price, total_qty, offsets):
-        open_orders = self.get_open_orders()
-        sell_orders = [o for o in open_orders if o.get('side') == 'SELL' and o.get('reduceOnly') in (True, 'true', 'True')]
-        p1 = self.client.round_price(base_price * (1 + offsets[0]))
-        p2 = self.client.round_price(base_price * (1 + offsets[1]))
-        half = self.client.round_qty(total_qty / 2.0)
-
-        existing = {o.get('clientOrderId',''): o for o in sell_orders}
-        changes = {'created':0, 'updated':0, 'kept':0}
-
-        def upsert(tag, price_target):
-            cid = f"TP_{tag}"
-            o = existing.get(cid)
-            if o:
-                try:
-                    current_price = float(o.get('price') or o.get('origPrice') or 0)
-                except Exception:
-                    current_price = 0
-                if abs(current_price - price_target) > 1e-9:
-                    self.cancel_order(o['orderId'])
-                    self.place_tp_sell(price_target, half, tag)
-                    changes['updated'] += 1
-                else:
-                    changes['kept'] += 1
-            else:
-                self.place_tp_sell(price_target, half, tag)
-                changes['created'] += 1
-
-        upsert('A', p1)
-        upsert('B', p2)
-        return changes
+    def ensure_take_profits(self, avg_entry, qty, open_orders, offset=0.0002):
+        """
+        Solo establece TP si mejora el precio promedio de entrada y no hay TP activa en rango similar.
+        TP se reestablece a +3% ROI sobre el margen utilizado. Si existe TP vigente y en rango, no lo cancela.
+        """
+        tp_price = avg_entry * 1.03
+        tp_orders = [o for o in open_orders if o.get('side') == 'SELL' and o.get('reduceOnly')]
+        def is_tp_near(price, target):
+            return abs(price - target) / target <= offset
+        tp_exists = any(is_tp_near(float(o.get('price')), tp_price) for o in tp_orders if o.get('price'))
+        if not tp_exists and tp_price > avg_entry:
+            self.place_tp_sell(tp_price, qty, "AUTO_TP")
 
     def ensure_stop_loss(self, stop_price):
         open_orders = self.get_open_orders()
-        sls = [o for o in open_orders if o.get('type') in ('STOP_MARKET','STOP') and o.get('closePosition') in (True,'true','True')]
+        sls = [o for o in open_orders if o.get('type') in (ORDER_TYPE_STOP_MARKET,'STOP') and o.get('closePosition') in (True,'true','True')]
         tolerance = 0.002
         for o in sls:
             try:

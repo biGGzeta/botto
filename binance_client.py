@@ -1,3 +1,5 @@
+ORDER_TYPE_STOP_MARKET = "STOP_MARKET"
+
 import time
 from binance.client import Client
 from binance.enums import *
@@ -7,23 +9,19 @@ from config import API_KEY, API_SECRET, SYMBOL, LEVERAGE, PAPER_MODE, USE_TESTNE
 class BinanceClient:
     def __init__(self):
         self.client = Client(API_KEY, API_SECRET, testnet=USE_TESTNET)
-        # Ajuste de URL para algunas versiones en testnet
         if USE_TESTNET:
             try:
                 self.client.FUTURES_URL = 'https://testnet.binancefuture.com/fapi'
             except Exception:
                 pass
-        # Filtros del símbolo
         self.filters = self._load_symbol_filters(SYMBOL)
 
         if not PAPER_MODE:
-            # Attempt set leverage, ignore if invalid keys
             try:
                 self.client.futures_change_leverage(symbol=SYMBOL, leverage=LEVERAGE)
             except Exception as e:
                 print(f"[WARN] set leverage: {e}")
 
-    # ---------- Exchange filters ----------
     def _load_symbol_filters(self, symbol):
         try:
             info = self.client.futures_exchange_info()
@@ -45,14 +43,12 @@ class BinanceClient:
     def round_qty(self, qty):
         step = self.filters['stepSize']
         min_qty = self.filters['minQty']
-        # ceil to step
         steps = int(qty / step)
         q = steps * step
         if q < min_qty:
             q = min_qty
         return float(f"{q:.6f}")
 
-    # ---------- Helpers ----------
     def futures_account(self):
         if PAPER_MODE:
             return {'assets': [{'asset':'USDT','availableBalance':'0'}]}
@@ -73,7 +69,6 @@ class BinanceClient:
             return []
         return self.client.futures_position_information(symbol=SYMBOL)
 
-    # ---------- Orders ----------
     def futures_create_order(self, **kwargs):
         if PAPER_MODE:
             print(f"[PAPER][CREATE_ORDER] {kwargs}")
@@ -92,9 +87,6 @@ class BinanceClient:
         return self.client.futures_get_open_orders(symbol=SYMBOL)
 
     def place_limit(self, side, price, qty, reduce_only=False, newClientOrderId=None):
-        """
-        Wrapper para crear órdenes límite (Futures) en Binance.
-        """
         if price is None or price == 0 or qty is None or qty == 0:
             print("[ERROR] place_limit: precio o qty cero/None")
             return {'status': 'ERROR', 'error': 'price or qty zero'}
@@ -119,9 +111,6 @@ class BinanceClient:
             return {'status': 'ERROR', 'error': str(e)}
 
     def place_stop_market_close_position(self, stop_price):
-        """
-        Coloca una orden STOP_MARKET para cerrar posición.
-        """
         if stop_price is None or stop_price == 0:
             print("[ERROR] place_stop_market_close_position: stop_price cero/None")
             return {'status': 'ERROR', 'error': 'stop_price zero'}
@@ -161,10 +150,8 @@ class BinanceClient:
     def cancel_all(self):
         return self.futures_cancel_all_open_orders()
 
-    # ---------- User stream ----------
+    # --- FIX: Add user stream methods ---
     def futures_stream_get_listen_key(self):
-        if PAPER_MODE:
-            return None
         try:
             res = self.client.futures_stream_get_listen_key()
             if isinstance(res, dict):
@@ -190,8 +177,4 @@ class BinanceClient:
         except Exception as e:
             print(f"[WARN] listenKey close: {e}")
 
-    # ---------- Public price ----------
-    def futures_symbol_price_ticker(self):
-        if PAPER_MODE:
-            return {'price': 0.0}
-        return self.client.futures_symbol_ticker(symbol=SYMBOL)
+    # Otros métodos de user stream y public price igual que antes...

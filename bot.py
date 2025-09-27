@@ -21,7 +21,7 @@ BOT_VERSION = "v1"
 class GridBot:
     def __init__(self):
         self.client = BinanceClient()
-        self.orders = OrderManager()
+        self.orders = OrderManager(self.client)  # CORREGIDO: pasa self.client
         self.state = StateManager()
         self.last_price = None
         self.last_signal = None

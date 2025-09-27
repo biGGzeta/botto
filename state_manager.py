@@ -59,7 +59,8 @@ class StateManager:
         self.state['posicion_total'] = max(0.0, float(self.state['posicion_total']) - cantidad)
         self.state['fees_total'] += float(fee)
         self.state['fills'].append({"side": "SELL", "precio": precio, "cantidad": cantidad, "fee": fee})
-        if self.state['posicion_total'] < 1e-8:
+        # FIX robusto
+        if self.state['posicion_total'] < 1e-3:
             self.resetear_posicion()
         else:
             self.save_state()

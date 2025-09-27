@@ -3,6 +3,8 @@ ORDER_TYPE_STOP_MARKET = "STOP_MARKET"
 from binance_client import BinanceClient
 from config import SYMBOL
 
+import time
+
 class OrderManager:
     def __init__(self, client: BinanceClient):
         self.client = client
@@ -17,13 +19,14 @@ class OrderManager:
     def place_grid_buy(self, price, qty, index):
         price = self.client.round_price(price)
         qty = self.client.round_qty(qty)
-        cId = f"GRID_BUY_{index}"
+        # Usar un client order id único (timestamp)
+        cId = f"GRID_BUY_{index}_{int(time.time()*1000)}"
         return self.client.place_limit('BUY', price, qty, reduce_only=False, newClientOrderId=cId)
 
     def place_tp_sell(self, price, qty, tag):
         price = self.client.round_price(price)
         qty = self.client.round_qty(qty)
-        cId = f"TP_{tag}"
+        cId = f"TP_{tag}_{int(time.time()*1000)}"
         return self.client.place_limit('SELL', price, qty, reduce_only=True, newClientOrderId=cId)
 
     def place_sl_close_position(self, stop_price):
@@ -46,6 +49,8 @@ class OrderManager:
     def colocar_orden_limit(self, side, price, qty, reduce_only=False, newClientOrderId=None):
         price = self.client.round_price(price)
         qty = self.client.round_qty(qty)
+        if not newClientOrderId:
+            newClientOrderId = f"ORDER_{side}_{int(time.time()*1000)}"
         return self.client.place_limit(
             side,
             price,
@@ -94,7 +99,7 @@ class OrderManager:
         Establece TP a +0.3% sobre el precio promedio de entrada.
         Solo crea TP si no existe en rango y mejora el promedio.
         """
-        tp_price = self.client.round_price(avg_entry * 1.003)  # 0.3% sobre entrada
+        tp_price = self.client.round_price(avg_entry * 1.003)
         qty = self.client.round_qty(qty)
         tp_orders = [o for o in open_orders if o.get('side') == 'SELL' and o.get('reduceOnly')]
         def is_tp_near(price, target):

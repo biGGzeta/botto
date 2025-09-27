@@ -15,20 +15,23 @@ class OrderManager:
         return self.client.round_qty(qty)
 
     def place_grid_buy(self, price, qty, index):
+        price = self.client.round_price(price)
+        qty = self.client.round_qty(qty)
         cId = f"GRID_BUY_{index}"
         return self.client.place_limit('BUY', price, qty, reduce_only=False, newClientOrderId=cId)
 
     def place_tp_sell(self, price, qty, tag):
+        price = self.client.round_price(price)
+        qty = self.client.round_qty(qty)
         cId = f"TP_{tag}"
         return self.client.place_limit('SELL', price, qty, reduce_only=True, newClientOrderId=cId)
 
     def place_sl_close_position(self, stop_price):
+        stop_price = self.client.round_price(stop_price)
         return self.client.place_stop_market_close_position(stop_price)
 
     def colocar_stop_loss_close_position(self, stop_price):
-        """
-        Coloca una orden STOP_MARKET para cerrar la posición en el cliente Binance.
-        """
+        stop_price = self.client.round_price(stop_price)
         return self.client.place_stop_market_close_position(stop_price)
 
     def get_open_orders(self):
@@ -41,9 +44,8 @@ class OrderManager:
         return self.client.cancel_all()
 
     def colocar_orden_limit(self, side, price, qty, reduce_only=False, newClientOrderId=None):
-        """
-        Coloca una orden límite usando el cliente Binance.
-        """
+        price = self.client.round_price(price)
+        qty = self.client.round_qty(qty)
         return self.client.place_limit(
             side,
             price,
@@ -52,7 +54,6 @@ class OrderManager:
             newClientOrderId=newClientOrderId
         )
 
-    # ---------- Reconcile grid (diff) ----------
     def reconcile_grid(self, desired_levels: list, qty, price_tolerance=0.5):
         open_orders = self.get_open_orders()
         buy_orders = [o for o in open_orders if o.get('side') == 'BUY']
@@ -73,7 +74,6 @@ class OrderManager:
             if not found:
                 to_create.append((i, level))
 
-        # cancel extra buy orders not in matched
         to_cancel = [o for o in buy_orders if o.get('orderId') not in matched_ids]
         for o in to_cancel:
             try:
@@ -89,13 +89,13 @@ class OrderManager:
 
         return {'created': len(to_create), 'canceled': len(to_cancel), 'kept': len(matched_ids)}
 
-    # ---------- TP/SL dedupe & ensure ----------
     def ensure_take_profits(self, avg_entry, qty, open_orders, offset=0.0002):
         """
-        Solo establece TP si mejora el precio promedio de entrada y no hay TP activa en rango similar.
-        TP se reestablece a +3% ROI sobre el margen utilizado. Si existe TP vigente y en rango, no lo cancela.
+        Establece TP a +0.3% sobre el precio promedio de entrada.
+        Solo crea TP si no existe en rango y mejora el promedio.
         """
-        tp_price = avg_entry * 1.03
+        tp_price = self.client.round_price(avg_entry * 1.003)  # 0.3% sobre entrada
+        qty = self.client.round_qty(qty)
         tp_orders = [o for o in open_orders if o.get('side') == 'SELL' and o.get('reduceOnly')]
         def is_tp_near(price, target):
             return abs(price - target) / target <= offset
@@ -104,6 +104,7 @@ class OrderManager:
             self.place_tp_sell(tp_price, qty, "AUTO_TP")
 
     def ensure_stop_loss(self, stop_price):
+        stop_price = self.client.round_price(stop_price)
         open_orders = self.get_open_orders()
         sls = [o for o in open_orders if o.get('type') in (ORDER_TYPE_STOP_MARKET,'STOP') and o.get('closePosition') in (True,'true','True')]
         tolerance = 0.002

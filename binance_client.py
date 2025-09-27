@@ -45,7 +45,6 @@ class BinanceClient:
     def round_qty(self, qty):
         step = self.filters['stepSize']
         min_qty = self.filters['minQty']
-        # ceil to step
         steps = int(qty / step)
         q = steps * step
         if q < min_qty:
@@ -91,13 +90,56 @@ class BinanceClient:
             return []
         return self.client.futures_get_open_orders(symbol=SYMBOL)
 
+    # Método necesario para OrderManager y bot.py
+    def place_limit(self, side, price, qty, reduce_only=False, newClientOrderId=None):
+        """
+        Wrapper para crear órdenes límite (Futures) en Binance.
+        """
+        params = {
+            'symbol': SYMBOL,
+            'side': side,
+            'type': ORDER_TYPE_LIMIT,
+            'price': float(price),
+            'quantity': float(qty),
+            'reduceOnly': reduce_only,
+            'timeInForce': TIME_IN_FORCE_GTC,
+        }
+        if newClientOrderId:
+            params['newClientOrderId'] = newClientOrderId
+        return self.futures_create_order(**params)
+
+    def place_stop_market_close_position(self, stop_price):
+        """
+        Coloca una orden STOP_MARKET para cerrar posición.
+        """
+        params = {
+            'symbol': SYMBOL,
+            'side': SIDE_SELL,
+            'type': ORDER_TYPE_STOP_MARKET,
+            'stopPrice': float(stop_price),
+            'reduceOnly': True,
+            'closePosition': True,
+        }
+        return self.futures_create_order(**params)
+
+    def get_open_orders(self):
+        return self.futures_get_open_orders()
+
+    def cancel_order(self, orderId):
+        if PAPER_MODE:
+            print(f"[PAPER] cancelar orden {orderId}")
+            return {'status': 'CANCELLED', 'orderId': orderId}
+        return self.client.futures_cancel_order(symbol=SYMBOL, orderId=orderId)
+
+    def cancel_all(self):
+        return self.futures_cancel_all_open_orders()
+
     # ---------- User stream ----------
     def futures_stream_get_listen_key(self):
         if PAPER_MODE:
             return None
         try:
             res = self.client.futures_stream_get_listen_key()
-            # Puede ser dict o str según versión
             if isinstance(res, dict):
                 return res.get('listenKey')
             return res
@@ -123,8 +165,6 @@ class BinanceClient:
 
     # ---------- Public price ----------
     def futures_symbol_price_ticker(self):
-        try:
-            return self.client.futures_symbol_ticker(symbol=SYMBOL)
-        except Exception as e:
-            print(f"[WARN] ticker: {e}")
-            return {'price': None}
+        if PAPER_MODE:
+            return {'price': 0.0}
+        return self.client.futures_symbol_ticker(symbol=SYMBOL)

@@ -29,6 +29,18 @@ class OrderManager:
     def cancel_all(self):
         return self.client.cancel_all()
 
+    def colocar_orden_limit(self, side, price, qty, reduce_only=False, newClientOrderId=None):
+        """
+        Coloca una orden límite usando el cliente Binance.
+        """
+        return self.client.place_limit(
+            side,
+            price,
+            qty,
+            reduce_only=reduce_only,
+            newClientOrderId=newClientOrderId
+        )
+
     # ---------- Reconcile grid (diff) ----------
     def reconcile_grid(self, desired_levels: list, qty, price_tolerance=0.5):
         open_orders = self.get_open_orders()

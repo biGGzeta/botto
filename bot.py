@@ -1,5 +1,6 @@
 import asyncio
 import time
+from datetime import datetime
 from websocket_listener import WebSocketManager
 from binance_client import BinanceClient
 from orders import OrderManager
@@ -12,6 +13,10 @@ from config import (
     MIN_PROFIT_THRESHOLD, TP_OFFSET_LOW, TP_OFFSET_MID, TP_OFFSET_HIGH,
     STOP_LOSS_PERCENTAGE, PAPER_MODE, MAKER_FEE_RATE
 )
+
+from logger import guardar_estado_vivo, guardar_historico
+
+BOT_VERSION = "v1"
 
 class GridBot:
     def __init__(self):
@@ -31,7 +36,6 @@ class GridBot:
         if sig == 'DUMP':
             self.last_signal = sig
             print("[ESTRATEGIA] Caída rápida detectada → spacing MAX")
-        # precio last de trade
         try:
             self.last_price = float(msg.get('p') or self.last_price or 0)
         except Exception:
@@ -46,7 +50,6 @@ class GridBot:
         await self._rebalance_si_corresponde()
 
     async def procesar_ticker(self, msg):
-        # MiniTicker tiene 'c' (close)
         try:
             price = float(msg.get('c'))
             self.last_price = price
@@ -55,17 +58,15 @@ class GridBot:
         await self._rebalance_si_corresponde()
 
     async def procesar_user(self, msg):
-        # futures ORDER_TRADE_UPDATE
         try:
             if msg.get('e') != 'ORDER_TRADE_UPDATE':
                 return
             o = msg.get('o', {})
-            s = o.get('S')  # SIDE
-            X = o.get('X')  # current order status
-            avg_price = float(o.get('ap') or 0)  # average price
-            last_filled_qty = float(o.get('l') or 0)  # last filled qty
+            s = o.get('S')
+            X = o.get('X')
+            avg_price = float(o.get('ap') or 0)
+            last_filled_qty = float(o.get('l') or 0)
             commission = float(o.get('n') or 0)
-            # Sólo procesamos fills
             if last_filled_qty > 0 and X in ('PARTIALLY_FILLED','FILLED'):
                 if s == 'BUY':
                     self.state.agregar_compra(avg_price, last_filled_qty, fee=commission)
@@ -82,17 +83,20 @@ class GridBot:
         if now - self._last_rebalance < REBALANCE_SECONDS:
             return
 
-        # Recomendar spacing y rango según señal
         self.current_spacing = strategy.recomendar_spacing(self.last_signal, MIN_GRID_SPACING, MAX_GRID_SPACING)
         self.current_range = strategy.recomendar_rango(self.last_signal, GRID_RANGE_MIN, GRID_RANGE_MAX)
-
         niveles = strategy.construir_grid(self.last_price, self.current_spacing, self.current_range)
-        # Cap por margen disponible
         niveles = await self._cap_por_margen(niveles)
 
         self._last_rebalance = now
         if not niveles:
             return
+
+        # --- LOGGING ---
+        contexto = self._get_contexto_log()
+        guardar_estado_vivo(contexto)
+        guardar_historico(contexto)
+        # --- END LOGGING ---
 
         print(f"[GRID] Rebalance spacing={round(self.current_spacing*100,2)}% range={round(self.current_range*100,2)}% niveles={len(niveles)}")
 
@@ -114,14 +118,13 @@ class GridBot:
         await self.colocar_tp_y_sl_si_corresponde()
 
     async def _cap_por_margen(self, niveles):
-        # Conservador: asume que todas las órdenes podrían llenarse
         if PAPER_MODE:
             return niveles[:20]
         try:
             avail = self.client.get_available_balance()
             if avail <= 0:
                 return niveles[:5]
-            max_orders = int(avail // float(ORDER_USDT_SIZE))
+            max_orders = int(avail // float(self.client.ORDER_USDT_SIZE))
             if max_orders <= 0:
                 max_orders = 1
             return niveles[:max_orders]
@@ -129,7 +132,6 @@ class GridBot:
             return niveles[:10]
 
     def _tp_threshold_neto(self):
-        # 0.30% + fees netos aproximados
         pos = float(self.state.state.get('posicion_total', 0.0))
         if pos <= 0:
             return None
@@ -150,8 +152,6 @@ class GridBot:
             return
 
         target_base = avg * (1 + threshold)
-
-        # Elegir offsets según volatilidad (spacing actual)
         if self.current_spacing <= 0.004:
             offsets = TP_OFFSET_LOW
         elif self.current_spacing <= 0.006:
@@ -163,13 +163,49 @@ class GridBot:
             print(f"[TP] Condición alcanzada. avg={avg:.2f} base={target_base:.2f} last={self.last_price:.2f} offsets={offsets}")
             self.orders.colocar_take_profits(target_base, pos, offsets=offsets)
 
-        # SL global dinámico
         sl_price = avg * (1 - STOP_LOSS_PERCENTAGE)
         self.orders.colocar_stop_loss_close_position(sl_price)
 
+        # --- LOGGING ---
+        contexto = self._get_contexto_log()
+        guardar_estado_vivo(contexto)
+        guardar_historico(contexto)
+        # --- END LOGGING ---
+
+    def _get_contexto_log(self):
+        try:
+            position = {
+                "qty": float(self.state.state.get('posicion_total', 0.0)),
+                "avg": self.state.calcular_costo_promedio(),
+                "fees": float(self.state.state.get('fees_total', 0.0)),
+            }
+            open_orders = self.orders.get_open_orders()
+            open_orders_min = [
+                {"side": o.get("side"), "price": o.get("price"), "qty": o.get("origQty"), "reduceOnly": o.get("reduceOnly")}
+                for o in open_orders
+            ]
+            take_profits = [o for o in open_orders if o.get("side") == "SELL" and o.get("reduceOnly") in (True, "true", "True")]
+            take_profits_min = [
+                {"price": o.get("price"), "qty": o.get("origQty"), "clientOrderId": o.get("clientOrderId")} for o in take_profits
+            ]
+            stop_loss = next((o for o in open_orders if o.get("side") == "SELL" and o.get("type", "") == "STOP_MARKET"), {})
+            contexto = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "signal": self.last_signal,
+                "last_price": self.last_price,
+                "position": position,
+                "open_orders": open_orders_min,
+                "take_profits": take_profits_min,
+                "stop_loss": {"price": stop_loss.get("stopPrice")},
+                "bot_version": BOT_VERSION,
+                "symbol": SYMBOL,
+            }
+        except Exception as e:
+            contexto = {"error": str(e), "timestamp": datetime.utcnow().isoformat()}
+        return contexto
+
     async def run(self):
         ws = WebSocketManager()
-
         async def handler(msg, tipo):
             try:
                 if tipo == 'TRADE':
@@ -182,7 +218,6 @@ class GridBot:
                     await self.procesar_user(msg)
             except Exception as e:
                 print(f"[ERROR] Handler {tipo}: {e}")
-
         await ws.start_all(handler)
 
 if __name__ == "__main__":

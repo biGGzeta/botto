@@ -38,7 +38,7 @@ class BinanceClient:
 
     def round_price(self, price):
         tick = self.filters['tickSize']
-        return round((round(price / tick)) * tick, 2)
+        return float(f"{round(round(price / tick) * tick, 8)}")
 
     def round_qty(self, qty):
         step = self.filters['stepSize']
@@ -87,6 +87,8 @@ class BinanceClient:
         return self.client.futures_get_open_orders(symbol=SYMBOL)
 
     def place_limit(self, side, price, qty, reduce_only=False, newClientOrderId=None):
+        price = self.round_price(price)
+        qty = self.round_qty(qty)
         if price is None or price == 0 or qty is None or qty == 0:
             print("[ERROR] place_limit: precio o qty cero/None")
             return {'status': 'ERROR', 'error': 'price or qty zero'}
@@ -111,6 +113,7 @@ class BinanceClient:
             return {'status': 'ERROR', 'error': str(e)}
 
     def place_stop_market_close_position(self, stop_price):
+        stop_price = self.round_price(stop_price)
         if stop_price is None or stop_price == 0:
             print("[ERROR] place_stop_market_close_position: stop_price cero/None")
             return {'status': 'ERROR', 'error': 'stop_price zero'}
@@ -119,7 +122,6 @@ class BinanceClient:
             'side': SIDE_SELL,
             'type': ORDER_TYPE_STOP_MARKET,
             'stopPrice': float(stop_price),
-            'reduceOnly': True,
             'closePosition': True,
         }
         try:
@@ -150,7 +152,6 @@ class BinanceClient:
     def cancel_all(self):
         return self.futures_cancel_all_open_orders()
 
-    # --- FIX: Add user stream methods ---
     def futures_stream_get_listen_key(self):
         try:
             res = self.client.futures_stream_get_listen_key()

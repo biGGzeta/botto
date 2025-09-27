@@ -14,7 +14,6 @@ from config import (
     STOP_LOSS_PERCENTAGE, PAPER_MODE, MAKER_FEE_RATE,
     ORDER_USDT_SIZE, LEVERAGE
 )
-
 from logger import guardar_estado_vivo, guardar_historico
 
 BOT_VERSION = "v1"
@@ -22,7 +21,7 @@ BOT_VERSION = "v1"
 class GridBot:
     def __init__(self):
         self.client = BinanceClient()
-        self.orders = OrderManager(self.client)  # CORREGIDO: pasa self.client
+        self.orders = OrderManager(self.client)
         self.state = StateManager()
         self.last_price = None
         self.last_signal = None
@@ -79,7 +78,8 @@ class GridBot:
 
     async def _rebalance_si_corresponde(self):
         now = time.time()
-        if self.last_price is None:
+        if self.last_price is None or self.last_price == 0:
+            print("[GRID] Precio no válido para rebalanceo, omitiendo...")
             return
         if now - self._last_rebalance < REBALANCE_SECONDS:
             return
@@ -91,6 +91,7 @@ class GridBot:
 
         self._last_rebalance = now
         if not niveles:
+            print("[GRID] No hay niveles para grid.")
             return
 
         # --- LOGGING ---
@@ -101,20 +102,28 @@ class GridBot:
 
         print(f"[GRID] Rebalance spacing={round(self.current_spacing*100,2)}% range={round(self.current_range*100,2)}% niveles={len(niveles)}")
 
-        if PAPER_MODE:
-            for p in niveles[:6]:
-                qty = self.orders.calcular_cantidad(p, ORDER_USDT_SIZE, LEVERAGE)
-                print(f"[PAPER][BUY] LIMIT {p} x {qty}")
-            return
-
+        # CANCELAR TODAS LAS ÓRDENES ANTES DE ARMAR NUEVAS
         try:
-            self.orders.cancelar_todas()
-        except Exception:
-            pass
+            self.orders.cancel_all()
+            await asyncio.sleep(0.5)  # Esperar un poco para asegurar que se cancelan
+        except Exception as e:
+            print(f"[ERROR] Cancelar todas: {e}")
+
+        # Chequear que no quedan órdenes abiertas
+        open_orders = self.orders.get_open_orders()
+        if open_orders:
+            print(f"[WARN] Quedaron {len(open_orders)} órdenes abiertas antes de crear grid nuevo")
 
         for p in niveles:
+            if p is None or p == 0:
+                continue
             qty = self.orders.calcular_cantidad(p, ORDER_USDT_SIZE, LEVERAGE)
-            self.orders.colocar_orden_limit('BUY', p, qty, reduce_only=False)
+            if qty is None or qty == 0:
+                continue
+            try:
+                self.orders.colocar_orden_limit('BUY', p, qty, reduce_only=False)
+            except Exception as e:
+                print(f"[ERROR] crear orden grid: {e}")
 
         await self.colocar_tp_y_sl_si_corresponde()
 
@@ -148,21 +157,10 @@ class GridBot:
         if pos <= 0 or self.last_price is None:
             return
         avg = self.state.calcular_costo_promedio()
-        threshold = self._tp_threshold_neto()
-        if threshold is None:
-            return
+        open_orders = self.orders.get_open_orders()
 
-        target_base = avg * (1 + threshold)
-        if self.current_spacing <= 0.004:
-            offsets = TP_OFFSET_LOW
-        elif self.current_spacing <= 0.006:
-            offsets = TP_OFFSET_MID
-        else:
-            offsets = TP_OFFSET_HIGH
-
-        if self.last_price >= target_base:
-            print(f"[TP] Condición alcanzada. avg={avg:.2f} base={target_base:.2f} last={self.last_price:.2f} offsets={offsets}")
-            self.orders.colocar_take_profits(target_base, pos, offsets=offsets)
+        # TP robusto y simplificado: solo crea TP si no existe en rango y mejora promedio de entrada
+        self.orders.ensure_take_profits(avg, pos, open_orders, offset=0.0002)
 
         sl_price = avg * (1 - STOP_LOSS_PERCENTAGE)
         self.orders.colocar_stop_loss_close_position(sl_price)

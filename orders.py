@@ -1,7 +1,7 @@
 ORDER_TYPE_STOP_MARKET = "STOP_MARKET"
 
 from binance_client import BinanceClient
-from config import SYMBOL
+from config import SYMBOL, TP_OFFSET_LOW  # <-- Importa TP_OFFSET_LOW
 
 import time
 
@@ -96,10 +96,10 @@ class OrderManager:
 
     def ensure_take_profits(self, avg_entry, qty, open_orders, offset=0.0002):
         """
-        Establece TP a +0.3% sobre el precio promedio de entrada.
+        Establece TP usando TP_OFFSET_LOW sobre el precio promedio de entrada.
         Solo crea TP si no existe en rango y mejora el promedio.
         """
-        tp_price = self.client.round_price(avg_entry * 1.003)
+        tp_price = self.client.round_price(avg_entry * (1 + TP_OFFSET_LOW))  # <-- Usa TP_OFFSET_LOW de config.py
         qty = self.client.round_qty(qty)
         tp_orders = [o for o in open_orders if o.get('side') == 'SELL' and o.get('reduceOnly')]
         def is_tp_near(price, target):

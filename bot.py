@@ -12,11 +12,54 @@ from config import (
     GRID_RANGE_MIN, GRID_RANGE_MAX, REBALANCE_SECONDS,
     MIN_PROFIT_THRESHOLD, TP_OFFSET_LOW, TP_OFFSET_MID, TP_OFFSET_HIGH,
     STOP_LOSS_PERCENTAGE, PAPER_MODE, MAKER_FEE_RATE,
-    ORDER_USDT_SIZE, LEVERAGE, SAFE_SPREAD
+    ORDER_USDT_SIZE, LEVERAGE, SAFE_SPREAD,
+    TREND_GUARD_WINDOW, TREND_GUARD_UMBRAL_PAUSA,
+    TREND_GUARD_UMBRAL_REACTIVA, TREND_GUARD_LOG_INTERVAL
 )
+
 from logger import guardar_estado_vivo, guardar_historico
+from collections import deque
 
 BOT_VERSION = "v1"
+
+class GridTrendGuard:
+    def __init__(self):
+        self.price_history = deque()  # (timestamp, price)
+        self.grid_paused = False
+        self.last_log_ts = 0
+
+    def actualizar_precio(self, price):
+        now = time.time()
+        self.price_history.append((now, price))
+        # Mantener solo los últimos TREND_GUARD_WINDOW segundos
+        while self.price_history and now - self.price_history[0][0] > TREND_GUARD_WINDOW:
+            self.price_history.popleft()
+
+    def promedio(self):
+        now = time.time()
+        prices = [p for t, p in self.price_history if now - t <= TREND_GUARD_WINDOW]
+        if not prices:
+            return None
+        return sum(prices) / len(prices)
+
+    def check_grid_status(self, price):
+        avg = self.promedio()
+        now = time.time()
+        # Enviar log cada TREND_GUARD_LOG_INTERVAL segundos
+        if now - self.last_log_ts > TREND_GUARD_LOG_INTERVAL:
+            print(f"[TREND_GUARD] Promedio últimos {TREND_GUARD_WINDOW}s: {avg:.2f} - Precio actual: {price:.2f}")
+            self.last_log_ts = now
+
+        # PAUSAR grid si está +umbral sobre el promedio
+        if not self.grid_paused and avg is not None and price > avg * (1 + TREND_GUARD_UMBRAL_PAUSA):
+            self.grid_paused = True
+            print(f"[TREND_GUARD] Grid PAUSADO: precio {price:.2f} > promedio {avg:.2f} +{TREND_GUARD_UMBRAL_PAUSA*100:.2f}%")
+        # REACTIVAR grid si baja a +umbral sobre el promedio
+        elif self.grid_paused and avg is not None and price <= avg * (1 + TREND_GUARD_UMBRAL_REACTIVA):
+            self.grid_paused = False
+            print(f"[TREND_GUARD] Grid REACTIVADO: precio {price:.2f} <= promedio {avg:.2f} +{TREND_GUARD_UMBRAL_REACTIVA*100:.2f}%")
+
+        return not self.grid_paused  # True si se puede operar grid
 
 class GridBot:
     def __init__(self):
@@ -28,6 +71,16 @@ class GridBot:
         self.current_spacing = (MIN_GRID_SPACING + MAX_GRID_SPACING) / 2
         self.current_range = (GRID_RANGE_MIN + GRID_RANGE_MAX) / 2
         self._last_rebalance = 0
+        self._last_price_rest_fetched = 0  # Para rate-limitar el fallback REST
+
+        # Para lógica post-TP
+        self.last_tp_price = None
+        self.last_tp_time = None
+
+        # Para evitar grids hundidos
+        self.last_grid_price = None
+
+        self.trend_guard = GridTrendGuard()
 
         print(f"[INFO] PAPER_MODE={'ON' if PAPER_MODE else 'OFF'} | ENV={'TEST' if self.client.client.testnet else 'PROD'} | Symbol={SYMBOL}")
 
@@ -51,14 +104,14 @@ class GridBot:
             # Verifica si hay TP/SL activos
             for o in open_orders:
                 if o.get('side') == 'SELL' and o.get('reduceOnly'):
-                    tp_target = entry_price * 1.003
+                    tp_target = entry_price * (1 + TP_OFFSET_LOW)
                     if abs(float(o.get('price')) - tp_target)/tp_target <= 0.0002:
                         tp_ok = True
                 if o.get('type') in ("STOP_MARKET", "STOP") and o.get('closePosition') in (True, 'true', 'True'):
                     sl_ok = True
             if not tp_ok:
-                self.orders.place_tp_sell(entry_price*1.003, abs(qty), "AUTO_TP")
-                print(f"[STARTUP] TP repuesto en {self.client.round_price(entry_price*1.003):.2f}")
+                self.orders.place_tp_sell(entry_price * (1 + TP_OFFSET_LOW), abs(qty), "AUTO_TP")
+                print(f"[STARTUP] TP repuesto en {self.client.round_price(entry_price * (1 + TP_OFFSET_LOW)):.2f}")
             if not sl_ok:
                 self.orders.colocar_stop_loss_close_position(entry_price*(1-STOP_LOSS_PERCENTAGE))
                 print(f"[STARTUP] SL repuesto en {self.client.round_price(entry_price*(1-STOP_LOSS_PERCENTAGE)):.2f}")
@@ -66,29 +119,32 @@ class GridBot:
             print("[STARTUP] No hay posición abierta al iniciar el bot.")
 
     async def procesar_trade(self, msg):
+        price = msg.get('p') or msg.get('price') or msg.get('c')
+        try:
+            self.last_price = float(price or self.last_price or 0)
+        except Exception:
+            print(f"[DEBUG] Trade msg sin precio válido: {msg}")
+        self.trend_guard.actualizar_precio(self.last_price)
         sig = strategy.analizar_trade(msg)
         if sig == 'DUMP':
             self.last_signal = sig
             print("[ESTRATEGIA] Caída rápida detectada → spacing MAX")
-        try:
-            self.last_price = float(msg.get('p') or self.last_price or 0)
-        except Exception:
-            pass
-        await self._rebalance_si_corresponde()
-
-    async def procesar_depth(self, msg):
-        soporte = strategy.analizar_depth(msg)
-        if soporte:
-            self.last_signal = soporte
-            print(f"[ESTRATEGIA] Soporte detectado en {soporte['precio']} (vol {round(soporte['volumen'],3)}) → spacing MIN")
         await self._rebalance_si_corresponde()
 
     async def procesar_ticker(self, msg):
+        price = msg.get('c') or msg.get('price') or msg.get('p')
         try:
-            price = float(msg.get('c'))
-            self.last_price = price
+            self.last_price = float(price or self.last_price or 0)
         except Exception:
-            pass
+            print(f"[DEBUG] Ticker msg sin precio válido: {msg}")
+        self.trend_guard.actualizar_precio(self.last_price)
+        await self._rebalance_si_corresponde()
+
+    async def procesar_depth(self, msg):
+        soporte = strategy.analizar_depth(msg, last_price=self.last_price)
+        if soporte:
+            self.last_signal = soporte
+            print(f"[ESTRATEGIA] Soporte detectado en {soporte['precio']} (vol {round(soporte['volumen'],3)}) → spacing MIN")
         await self._rebalance_si_corresponde()
 
     async def procesar_user(self, msg):
@@ -107,16 +163,38 @@ class GridBot:
                 elif s == 'SELL':
                     self.state.agregar_venta(avg_price, last_filled_qty, fee=commission)
                 await self.colocar_tp_y_sl_si_corresponde()
+                if s == 'SELL' and self.state.state.get('posicion_total', 0.0) < 1e-3:
+                    self.last_tp_price = avg_price
+                    self.last_tp_time = time.time()
         except Exception as e:
             print(f"[USER] error parse: {e}")
 
     async def _rebalance_si_corresponde(self):
+        # Chequeo de trend guard
+        if self.last_price is not None:
+            puede_operar = self.trend_guard.check_grid_status(self.last_price)
+            if not puede_operar:
+                return
+
         now = time.time()
         if self.last_price is None or self.last_price == 0:
-            print("[GRID] Precio no válido para rebalanceo, omitiendo...")
+            print("[GRID] Precio no válido para rebalanceo, omitiendo... Intentando refrescar desde Binance REST.")
+            if now - getattr(self, '_last_price_rest_fetched', 0) > 30:
+                try:
+                    ticker = self.client.client.futures_symbol_ticker(symbol=SYMBOL)
+                    self.last_price = float(ticker['price'])
+                    self._last_price_rest_fetched = now
+                    print(f"[GRID] Precio refrescado vía REST: {self.last_price}")
+                except Exception as e:
+                    print(f"[GRID] Error al refrescar precio vía REST: {e}")
             return
         if now - self._last_rebalance < REBALANCE_SECONDS:
             return
+
+        if self.last_grid_price is not None:
+            if self.last_price < 0.95 * self.last_grid_price:
+                print(f"[WARN] Precio actual ({self.last_price}) está más de 5% debajo del último grid ({self.last_grid_price}), ignorando rebalance.")
+                return
 
         self.current_spacing = strategy.recomendar_spacing(self.last_signal, MIN_GRID_SPACING, MAX_GRID_SPACING)
         self.current_range = strategy.recomendar_rango(self.last_signal, GRID_RANGE_MIN, GRID_RANGE_MAX)
@@ -133,6 +211,7 @@ class GridBot:
         guardar_historico(contexto)
 
         print(f"[GRID] Rebalance spacing={round(self.current_spacing*100,2)}% range={round(self.current_range*100,2)}% niveles={len(niveles)}")
+        self.last_grid_price = self.last_price
 
         try:
             self.orders.cancel_all()
@@ -145,7 +224,6 @@ class GridBot:
             print(f"[WARN] Quedaron {len(open_orders)} órdenes abiertas antes de crear grid nuevo")
 
         avg_entry = self.state.calcular_costo_promedio()
-        # FIX robusto para posición residual
         pos_qty = float(self.state.state.get('posicion_total', 0.0))
         if pos_qty < 1e-3:
             print("[FIX] Posición virtualmente cerrada, reseteando avg_entry a 0 y posición_total a 0.")
@@ -153,12 +231,10 @@ class GridBot:
             self.state.state['posicion_total'] = 0.0
             self.state.state['costo_total'] = 0.0
             self.state.save_state()
-        # FIN FIX
 
         for p in niveles:
             if p is None or p == 0:
                 continue
-            # SAFE: Solo colocar la orden si está por debajo del promedio y mejora el promedio lo suficiente
             if avg_entry and p >= avg_entry:
                 print(f"[SAFE GRID] No se coloca orden en {p} porque está por encima del promedio de entrada ({avg_entry})")
                 continue
@@ -206,7 +282,9 @@ class GridBot:
             return
         avg = self.state.calcular_costo_promedio()
         open_orders = self.orders.get_open_orders()
-        self.orders.ensure_take_profits(avg, pos, open_orders, offset=0.0002)
+        tp_offset = TP_OFFSET_LOW
+        tp_price = avg * (1 + tp_offset)
+        self.orders.ensure_take_profits(avg, pos, open_orders, offset=tp_offset)
         sl_price = avg * (1 - STOP_LOSS_PERCENTAGE)
         self.orders.colocar_stop_loss_close_position(sl_price)
 
@@ -246,8 +324,21 @@ class GridBot:
             contexto = {"error": str(e), "timestamp": datetime.now(UTC).isoformat()}
         return contexto
 
+    async def chequeo_post_tp(self):
+        while True:
+            await asyncio.sleep(300)
+            if self.last_tp_price and self.last_tp_time:
+                if self.state.state.get('posicion_total', 0.0) < 1e-3:
+                    precio_actual = self.last_price
+                    if precio_actual and abs(precio_actual - self.last_tp_price)/self.last_tp_price > 0.0015:
+                        print("[TP GRID] El precio se alejó >0.15% del TP, reestableciendo el grid.")
+                        await self._rebalance_si_corresponde()
+                        self.last_tp_price = None
+                        self.last_tp_time = None
+
     async def run(self):
         await self.proteger_posicion_existente()
+        asyncio.create_task(self.chequeo_post_tp())
         ws = WebSocketManager()
         async def handler(msg, tipo):
             try:

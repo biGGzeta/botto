@@ -29,29 +29,37 @@ def evaluar_senales():
     ventas = [t for t in ultimos if t['sell']]
     vol_ventas = sum(t['qty'] for t in ventas)
     freq = len(ultimos) / 2.0  # trades/s
-    if freq > 15 and vol_ventas > 10:
+    if freq > 15 and vol_ventas > 300:
         if now - _last_dump_ts > COOLDOWN_MS:
             _last_dump_ts = now
             return 'DUMP'
     return None
 
-def analizar_depth(depth_msg):
+def analizar_depth(depth_msg, last_price=None):
     global _last_support_ts
     bids = depth_msg.get('b') or []
-    if not bids:
+    if not bids or last_price is None:
         return None
-    top5_vol = 0.0
-    top_bid_price = 0.0
-    for i, b in enumerate(bids[:5]):
+
+    # Filtro antispoofing: solo bids cerca del precio real
+    bids_realistas = []
+    for b in bids[:5]:
         try:
             p = float(b[0]); q = float(b[1])
-            top5_vol += q
-            if i == 0:
-                top_bid_price = p
+            # Solo aceptar bids dentro del 80%-120% del last_price
+            if 0.993 * last_price < p < 1.007 * last_price:
+                bids_realistas.append([p, q])
         except Exception:
             continue
+
+    if not bids_realistas:
+        return None
+
+    top5_vol = sum(q for p, q in bids_realistas)
+    top_bid_price = bids_realistas[0][0]
+
     now = int(time.time() * 1000)
-    if top5_vol > 100 and now - _last_support_ts > COOLDOWN_MS:
+    if top5_vol > 700 and now - _last_support_ts > COOLDOWN_MS:
         _last_support_ts = now
         return {'tipo': 'SOPORTE', 'precio': top_bid_price, 'volumen': top5_vol}
     return None

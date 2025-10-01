@@ -8,11 +8,12 @@ from state_manager import StateManager
 import strategy
 
 from config import (
-    SYMBOL, MIN_GRID_SPACING, MAX_GRID_SPACING,
+    ORDER_USDT_SIZE, SYMBOL, MIN_GRID_SPACING, MAX_GRID_SPACING,
     GRID_RANGE_MIN, GRID_RANGE_MAX, REBALANCE_SECONDS,
     MIN_PROFIT_THRESHOLD, TP_OFFSET_LOW, TP_OFFSET_MID, TP_OFFSET_HIGH,
     STOP_LOSS_PERCENTAGE, PAPER_MODE, MAKER_FEE_RATE,
     ORDER_USDT_SIZE, LEVERAGE, SAFE_SPREAD,
+    SAFE_SPREAD_INCREMENT, SAFE_SPREAD_INCREMENT_START,
     TREND_GUARD_WINDOW, TREND_GUARD_UMBRAL_PAUSA,
     TREND_GUARD_UMBRAL_REACTIVA, TREND_GUARD_LOG_INTERVAL
 )
@@ -24,14 +25,13 @@ BOT_VERSION = "v1"
 
 class GridTrendGuard:
     def __init__(self):
-        self.price_history = deque()  # (timestamp, price)
+        self.price_history = deque()
         self.grid_paused = False
         self.last_log_ts = 0
 
     def actualizar_precio(self, price):
         now = time.time()
         self.price_history.append((now, price))
-        # Mantener solo los últimos TREND_GUARD_WINDOW segundos
         while self.price_history and now - self.price_history[0][0] > TREND_GUARD_WINDOW:
             self.price_history.popleft()
 
@@ -45,21 +45,23 @@ class GridTrendGuard:
     def check_grid_status(self, price):
         avg = self.promedio()
         now = time.time()
-        # Enviar log cada TREND_GUARD_LOG_INTERVAL segundos
-        if now - self.last_log_ts > TREND_GUARD_LOG_INTERVAL:
-            print(f"[TREND_GUARD] Promedio últimos {TREND_GUARD_WINDOW}s: {avg:.2f} - Precio actual: {price:.2f}")
-            self.last_log_ts = now
+        if avg is not None and price is not None:
+            if now - self.last_log_ts > TREND_GUARD_LOG_INTERVAL:
+                print(f"[TREND_GUARD] Promedio últimos {TREND_GUARD_WINDOW}s: {avg:.2f} - Precio actual: {price:.2f}")
+                self.last_log_ts = now
+        else:
+            if now - self.last_log_ts > TREND_GUARD_LOG_INTERVAL:
+                print(f"[TREND_GUARD] Promedio o precio es None (avg={avg}, price={price})")
+                self.last_log_ts = now
 
-        # PAUSAR grid si está +umbral sobre el promedio
-        if not self.grid_paused and avg is not None and price > avg * (1 + TREND_GUARD_UMBRAL_PAUSA):
-            self.grid_paused = True
-            print(f"[TREND_GUARD] Grid PAUSADO: precio {price:.2f} > promedio {avg:.2f} +{TREND_GUARD_UMBRAL_PAUSA*100:.2f}%")
-        # REACTIVAR grid si baja a +umbral sobre el promedio
-        elif self.grid_paused and avg is not None and price <= avg * (1 + TREND_GUARD_UMBRAL_REACTIVA):
-            self.grid_paused = False
-            print(f"[TREND_GUARD] Grid REACTIVADO: precio {price:.2f} <= promedio {avg:.2f} +{TREND_GUARD_UMBRAL_REACTIVA*100:.2f}%")
-
-        return not self.grid_paused  # True si se puede operar grid
+        if avg is not None and price is not None:
+            if not self.grid_paused and price > avg * (1 + TREND_GUARD_UMBRAL_PAUSA):
+                self.grid_paused = True
+                print(f"[TREND_GUARD] Grid PAUSADO: precio {price:.2f} > promedio {avg:.2f} +{TREND_GUARD_UMBRAL_PAUSA*100:.2f}%")
+            elif self.grid_paused and price <= avg * (1 + TREND_GUARD_UMBRAL_REACTIVA):
+                self.grid_paused = False
+                print(f"[TREND_GUARD] Grid REACTIVADO: precio {price:.2f} <= promedio {avg:.2f} +{TREND_GUARD_UMBRAL_REACTIVA*100:.2f}%")
+        return not self.grid_paused
 
 class GridBot:
     def __init__(self):
@@ -71,13 +73,11 @@ class GridBot:
         self.current_spacing = (MIN_GRID_SPACING + MAX_GRID_SPACING) / 2
         self.current_range = (GRID_RANGE_MIN + GRID_RANGE_MAX) / 2
         self._last_rebalance = 0
-        self._last_price_rest_fetched = 0  # Para rate-limitar el fallback REST
+        self._last_price_rest_fetched = 0
 
-        # Para lógica post-TP
         self.last_tp_price = None
         self.last_tp_time = None
 
-        # Para evitar grids hundidos
         self.last_grid_price = None
 
         self.trend_guard = GridTrendGuard()
@@ -101,7 +101,6 @@ class GridBot:
             open_orders = self.orders.get_open_orders()
             tp_ok = False
             sl_ok = False
-            # Verifica si hay TP/SL activos
             for o in open_orders:
                 if o.get('side') == 'SELL' and o.get('reduceOnly'):
                     tp_target = entry_price * (1 + TP_OFFSET_LOW)
@@ -162,7 +161,9 @@ class GridBot:
                     self.state.agregar_compra(avg_price, last_filled_qty, fee=commission)
                 elif s == 'SELL':
                     self.state.agregar_venta(avg_price, last_filled_qty, fee=commission)
-                await self.colocar_tp_y_sl_si_corresponde()
+                # Lógica robusta: solo colocar TP/SL si hay posición abierta
+                if self.state.state.get('posicion_total', 0.0) > 1e-3:
+                    await self.colocar_tp_y_sl_si_corresponde()
                 if s == 'SELL' and self.state.state.get('posicion_total', 0.0) < 1e-3:
                     self.last_tp_price = avg_price
                     self.last_tp_time = time.time()
@@ -170,7 +171,6 @@ class GridBot:
             print(f"[USER] error parse: {e}")
 
     async def _rebalance_si_corresponde(self):
-        # Chequeo de trend guard
         if self.last_price is not None:
             puede_operar = self.trend_guard.check_grid_status(self.last_price)
             if not puede_operar:
@@ -232,14 +232,21 @@ class GridBot:
             self.state.state['costo_total'] = 0.0
             self.state.save_state()
 
+        fills = self.state.state.get('num_fills_grid', 0)
+        # Spread dinámico: 0.03% extra por cada fill desde el cuarto en adelante
+        if fills > SAFE_SPREAD_INCREMENT_START:
+            spread_dinamico = SAFE_SPREAD + (fills - SAFE_SPREAD_INCREMENT_START) * SAFE_SPREAD_INCREMENT
+        else:
+            spread_dinamico = SAFE_SPREAD
+
         for p in niveles:
             if p is None or p == 0:
                 continue
             if avg_entry and p >= avg_entry:
                 print(f"[SAFE GRID] No se coloca orden en {p} porque está por encima del promedio de entrada ({avg_entry})")
                 continue
-            if avg_entry and ((avg_entry - p)/avg_entry < SAFE_SPREAD):
-                print(f"[SAFE GRID] No se coloca orden en {p} porque no mejora el promedio suficiente (SAFE_SPREAD={SAFE_SPREAD})")
+            if avg_entry and ((avg_entry - p)/avg_entry < spread_dinamico):
+                print(f"[SAFE GRID] No se coloca orden en {p} porque no mejora el promedio suficiente (spread dinámico={spread_dinamico*100:.4f}% con {fills} fills)")
                 continue
             qty = self.orders.calcular_cantidad(p, ORDER_USDT_SIZE, LEVERAGE)
             if qty is None or qty == 0:
@@ -249,7 +256,9 @@ class GridBot:
             except Exception as e:
                 print(f"[ERROR] crear orden grid: {e}")
 
-        await self.colocar_tp_y_sl_si_corresponde()
+        # Solo coloca TP/SL si hay posición abierta
+        if self.state.state.get('posicion_total', 0.0) > 1e-3:
+            await self.colocar_tp_y_sl_si_corresponde()
 
     async def _cap_por_margen(self, niveles):
         if PAPER_MODE:
@@ -279,6 +288,7 @@ class GridBot:
     async def colocar_tp_y_sl_si_corresponde(self):
         pos = float(self.state.state.get('posicion_total', 0.0))
         if pos <= 0 or self.last_price is None:
+            print("[TP/SL] No hay posición abierta, no se colocan ReduceOnly.")
             return
         avg = self.state.calcular_costo_promedio()
         open_orders = self.orders.get_open_orders()
